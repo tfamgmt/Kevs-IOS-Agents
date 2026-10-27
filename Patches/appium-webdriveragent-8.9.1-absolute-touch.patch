@@ -6,7 +6,7 @@
 +#import "XCPointerEventPath.h"
 +#import "XCSynthesizedEventRecord.h"
 +@import Photos;
-@@ -16,0 +21,139 @@
+@@ -16,0 +21,148 @@
 +static BOOL FBWaitForPhotoLibraryAuthorization(NSError **error)
 +{
 +  __block PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelAddOnly];
@@ -64,7 +64,6 @@
 +      // camera/screen recordings and automation picks the wrong cell.
 +      PHAssetCreationRequest *request = [PHAssetCreationRequest creationRequestForAsset];
 +      request.creationDate = [NSDate date];
-+      request.modificationDate = [NSDate date];
 +      [request addResourceWithType:PHAssetResourceTypeVideo fileURL:fileURL options:nil];
 +      identifier = request.placeholderForCreatedAsset.localIdentifier;
 +    } else {
@@ -156,10 +155,10 @@
 +  return [FBXCTestDaemonsProxy synthesizeEventWithRecord:record error:error];
 +}
 +
-@@ -24,0 +168,2 @@
+@@ -24,0 +177,2 @@
 +    [[FBRoute POST:@"/wda/absolute-actions"].withoutSession respondWithTarget:self action:@selector(handlePerformW3CTouchActions:)],
 +    [[FBRoute POST:@"/wda/import-media"].withoutSession respondWithTarget:self action:@selector(handleImportMedia:)],
-@@ -30,0 +176,11 @@
+@@ -30,0 +185,11 @@
 ++ (id<FBResponsePayload>)handleImportMedia:(FBRouteRequest *)request
 +{
 +  NSError *error;
@@ -171,9 +170,9 @@
 +  return FBResponseWithObject(@{ @"localIdentifier": identifier, @"assetCount": @(assetCount) });
 +}
 +
-@@ -33 +188,0 @@
+@@ -33 +197,0 @@
 -  XCUIApplication *application = request.session.activeApplication;
-@@ -35,0 +191,9 @@
+@@ -35,0 +200,9 @@
 +  if (FBIsAbsoluteSingleTouchAction(actions)) {
 +    if (!FBPerformAbsoluteSingleTouchAction(actions, &error)) {
 +      return FBResponseWithUnknownError(error ?: [NSError errorWithDomain:@"com.facebook.WebDriverAgent"
