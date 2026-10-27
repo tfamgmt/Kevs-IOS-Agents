@@ -253,6 +253,7 @@ button:disabled { cursor: wait; opacity: .55; transform: none; }
 }
 .check-mark.passed { background: #176b4a; color: #bfffe4; }
 .check-mark.failed, .check-mark.blocked { background: #702f39; color: #ffd9df; }
+.check-mark.skipped { color: var(--muted); }
 .registration-guidance {
     margin: 20px 0;
     padding: 16px 18px;

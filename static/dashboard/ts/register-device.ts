@@ -1,6 +1,6 @@
 export {};
 
-type CheckState = 'pending' | 'checking' | 'blocked' | 'passed' | 'failed';
+type CheckState = 'pending' | 'checking' | 'blocked' | 'passed' | 'failed' | 'skipped';
 interface Device { name: string; osVersion: string; udid: string }
 interface RegistrationCheck { state: CheckState; message: string; updatedAt: string }
 interface Snapshot {
@@ -95,7 +95,7 @@ function render(snapshot: Snapshot): void {
     ports.textContent = `WDA ${snapshot.wdaLocalPort} · video ${snapshot.mjpegLocalPort}`;
     checks.replaceChildren(...Object.entries(snapshot.checks).map(([key, value]) => {
         const row = document.createElement('article'); row.className = `registration-check ${value.state}`;
-        const state = document.createElement('span'); state.className = `check-mark ${value.state}`; state.textContent = value.state === 'passed' ? '✓' : value.state === 'checking' ? '…' : '!';
+        const state = document.createElement('span'); state.className = `check-mark ${value.state}`; state.textContent = value.state === 'passed' ? '✓' : value.state === 'skipped' ? '–' : value.state === 'checking' ? '…' : '!';
         const copy = document.createElement('div'); const heading = document.createElement('h3'); heading.textContent = key.replace(/^./, (letter) => letter.toUpperCase());
         const message = document.createElement('p'); message.textContent = value.message; copy.append(heading, message); row.append(state, copy); return row;
     }));

@@ -15,7 +15,8 @@ import { passcodeForDevice, setDevicePasscode } from './secrets.js';
 import { WdaRemoteControl } from './wda-remote.js';
 import { diagnoseWdaLaunchFailure } from './wda/diagnostics.js';
 
-export type RegistrationCheckState = 'pending' | 'checking' | 'blocked' | 'passed' | 'failed';
+/** `skipped` marks an optional app that is not installed; it does not block registration. */
+export type RegistrationCheckState = 'pending' | 'checking' | 'blocked' | 'passed' | 'failed' | 'skipped';
 export type RegistrationAction = 'refresh' | 'prepare' | 'verify' | 'finalize';
 export type RegistrationCheckName = 'host' | 'connection' | 'signing' | 'developer'
     | 'wda' | 'appium' | 'video' | 'touch' | 'tiktok' | 'instagram' | 'accounts';
@@ -87,6 +88,28 @@ function now(): string {
 
 function check(state: RegistrationCheckState, message: string): RegistrationCheck {
     return { state, message, updatedAt: now() };
+}
+
+const optionalAppChecks: ReadonlySet<RegistrationCheckName> = new Set(['tiktok', 'instagram']);
+
+/**
+ * Social apps are optional. A missing app is skipped unless accounts were entered for it.
+ * Being installed says nothing about sign-in; that is only verified when accounts are entered.
+ */
+export function appInstallCheck(app: string, installed: boolean, bundleId: string, accounts: readonly string[]): RegistrationCheck {
+    if (installed) return check('passed', `${app} (${bundleId}) is installed`);
+    if (accounts.length) return check('blocked', `${app} accounts are configured but ${app} is not installed; install it or clear the ${app} accounts`);
+    return check('skipped', `${app} is not installed (optional); ${app} tasks will not run on this device`);
+}
+
+/** Every check must pass, except optional apps, which may be skipped. */
+export function checksAllowFinalize(checks: Record<RegistrationCheckName, RegistrationCheck>): boolean {
+    return checkNames.every((name) => checks[name].state === 'passed' || (optionalAppChecks.has(name) && checks[name].state === 'skipped'));
+}
+
+/** App tab taps only work in a signed-in app, so they run only for apps with configured accounts. */
+export function appsToTouchCheck(installed: { tiktok: boolean; instagram: boolean }, accounts: { tiktok: readonly string[]; instagram: readonly string[] }): Array<'tiktok' | 'instagram'> {
+    return (['tiktok', 'instagram'] as const).filter((app) => installed[app] && accounts[app].length > 0);
 }
 
 function publicSnapshot(session: RegistrationSession): RegistrationSnapshot {
@@ -392,12 +415,18 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
         if (!session.coordinateProfile) throw new Error('Choose a coordinate profile that matches the device screen');
         session.checks.appium = check('checking', 'Creating a no-reset Appium session');
         session.checks.video = check('checking', 'Reading the WDA video stream');
-        session.checks.touch = check('checking', 'Checking mapped TikTok and Instagram touch input');
+        session.checks.touch = check('checking', 'Checking touch input');
         session.checks.accounts = check('checking', 'Verifying configured social accounts with OCR');
         await this.inspectTikTok(session);
         await this.inspectInstagram(session);
-        if (session.checks.tiktok.state !== 'passed') return;
-        if (session.checks.instagram.state !== 'passed') return;
+        const tiktokInstalled = session.checks.tiktok.state === 'passed';
+        const instagramInstalled = session.checks.instagram.state === 'passed';
+        const appsReady = [session.checks.tiktok, session.checks.instagram].every(({ state }) => state === 'passed' || state === 'skipped');
+        if (!appsReady) {
+            const waiting = 'Waiting for the TikTok and Instagram checks to pass or be skipped';
+            for (const name of ['appium', 'video', 'touch', 'accounts'] as const) session.checks[name] = check('blocked', waiting);
+            return;
+        }
         const control = new WdaRemoteControl({
             deviceUdid: session.device.udid,
             wdaUrl: `http://127.0.0.1:${session.wdaLocalPort}`,
@@ -410,6 +439,7 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
             const appiumPort = Number(process.env.APPIUM_PORT ?? 4725);
             const tiktokBundleId = process.env.TIKTOK_BUNDLE_ID ?? 'com.zhiliaoapp.musically';
             const instagramBundleId = process.env.INSTAGRAM_BUNDLE_ID ?? 'com.burbn.instagram';
+            const settingsBundleId = 'com.apple.Preferences';
             driver = await remote({
                 hostname: process.env.APPIUM_HOST ?? '127.0.0.1',
                 port: appiumPort,
@@ -419,13 +449,14 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
                     platformName: 'iOS',
                     'appium:automationName': 'XCUITest',
                     'appium:udid': session.device.udid,
-                    'appium:bundleId': tiktokBundleId,
+                    // Settings is always installed and needs no sign-in, so the farm works with no social app ready.
+                    'appium:bundleId': settingsBundleId,
                     'appium:noReset': true,
                     'appium:forceAppLaunch': true,
                     'appium:webDriverAgentUrl': `http://127.0.0.1:${session.wdaLocalPort}`,
                 },
             });
-            session.checks.appium = check('passed', 'Appium attached to WDA and launched TikTok without resetting it');
+            session.checks.appium = check('passed', 'Appium attached to WDA and launched Settings');
             const stream = await control.getMjpegStream(session.device.udid);
             const reader = stream.body!.getReader();
             const first = await reader.read();
@@ -433,32 +464,34 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
             if (first.done || !first.value?.length) throw new Error('The WDA video stream returned no frames');
             session.checks.video = check('passed', 'WDA returned a live MJPEG frame');
             const tiktokCoordinates = coordinatesForProfile(session.coordinateProfile).tiktok;
-            const beforeTouch = await control.getScreenshot(session.device.udid);
-            await tapCoordinate(driver, tiktokCoordinates.profileTab.x, tiktokCoordinates.profileTab.y, 'TikTok Profile tab');
-            await driver.pause(1_000);
-            const profileScreen = await control.getScreenshot(session.device.udid);
-            if (profileScreen.equals(beforeTouch)) throw new Error('The TikTok Profile tap produced no visible screen change');
-            await tapCoordinate(driver, tiktokCoordinates.homeTab.x, tiktokCoordinates.homeTab.y, 'TikTok Home tab');
-            await driver.pause(1_000);
-            const homeScreen = await control.getScreenshot(session.device.udid);
-            if (homeScreen.equals(profileScreen)) throw new Error('The TikTok Home tap produced no visible screen change');
-
-            await driver.activateApp(instagramBundleId);
-            await driver.pause(2_000);
             const instagramCoordinates = coordinatesForProfile(session.coordinateProfile).instagram;
-            const beforeIg = await control.getScreenshot(session.device.udid);
-            await tapCoordinate(driver, instagramCoordinates.profileTab.x, instagramCoordinates.profileTab.y, 'Instagram Profile tab');
-            await driver.pause(1_000);
-            const igProfile = await control.getScreenshot(session.device.udid);
-            if (igProfile.equals(beforeIg)) throw new Error('The Instagram Profile tap produced no visible screen change');
-            await tapCoordinate(driver, instagramCoordinates.homeTab.x, instagramCoordinates.homeTab.y, 'Instagram Home tab');
-            await driver.pause(1_000);
-            const igHome = await control.getScreenshot(session.device.udid);
-            if (igHome.equals(igProfile)) throw new Error('The Instagram Home tap produced no visible screen change');
-            session.checks.touch = check('passed', 'TikTok and Instagram Profile/Home taps produced visible screen changes');
+            await this.verifySystemTouch(driver, control, session);
+            const appTouches = appsToTouchCheck(
+                { tiktok: tiktokInstalled, instagram: instagramInstalled },
+                { tiktok: session.tiktokAccounts, instagram: session.instagramAccounts },
+            );
+            for (const app of appTouches) {
+                const [name, bundleId, coordinates] = app === 'tiktok'
+                    ? ['TikTok', tiktokBundleId, tiktokCoordinates] as const
+                    : ['Instagram', instagramBundleId, instagramCoordinates] as const;
+                await driver.activateApp(bundleId);
+                await driver.pause(2_000);
+                const before = await control.getScreenshot(session.device.udid);
+                await tapCoordinate(driver, coordinates.profileTab.x, coordinates.profileTab.y, `${name} Profile tab`);
+                await driver.pause(1_000);
+                const profile = await control.getScreenshot(session.device.udid);
+                if (profile.equals(before)) throw new Error(`The ${name} Profile tap produced no visible screen change; make sure ${name} is signed in`);
+                await tapCoordinate(driver, coordinates.homeTab.x, coordinates.homeTab.y, `${name} Home tab`);
+                await driver.pause(1_000);
+                const home = await control.getScreenshot(session.device.udid);
+                if (home.equals(profile)) throw new Error(`The ${name} Home tap produced no visible screen change; make sure ${name} is signed in`);
+            }
+            session.checks.touch = check('passed', appTouches.length
+                ? `Touch input works; ${appTouches.map((app) => app === 'tiktok' ? 'TikTok' : 'Instagram').join(' and ')} Profile/Home taps produced visible screen changes`
+                : 'Touch input works (scrolled Settings); app taps are checked once accounts are added');
 
             const messages: string[] = [];
-            if (session.tiktokAccounts.length) {
+            if (tiktokInstalled && session.tiktokAccounts.length) {
                 await driver.activateApp(tiktokBundleId);
                 await driver.pause(1_500);
                 const accountCoordinates = {
@@ -472,7 +505,7 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
                 }
                 messages.push(`${session.tiktokAccounts.length} TikTok`);
             }
-            if (session.instagramAccounts.length) {
+            if (instagramInstalled && session.instagramAccounts.length) {
                 await driver.activateApp(instagramBundleId);
                 await driver.pause(1_500);
                 const accountCoordinates = {
@@ -496,14 +529,41 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
             else if (session.checks.video.state === 'checking') session.checks.video = check('failed', message);
             else if (session.checks.touch.state === 'checking') session.checks.touch = check('failed', message);
             else session.checks.accounts = check('blocked', message);
+            for (const name of ['video', 'touch', 'accounts'] as const) {
+                if (session.checks[name].state === 'checking') session.checks[name] = check('blocked', 'Waiting for the check above to pass');
+            }
         } finally {
             if (driver) await driver.deleteSession().catch(() => undefined);
         }
     }
 
+    /** Scrolls the Settings list and back; proves WDA touch input without needing any app signed in. */
+    private async verifySystemTouch(driver: Browser, control: WdaRemoteControl, session: RegistrationSession): Promise<void> {
+        const { width, height } = await driver.getWindowSize();
+        const x = Math.round(width / 2);
+        const swipe = async (fromY: number, toY: number) => {
+            await driver.performActions([{
+                type: 'pointer', id: 'finger', parameters: { pointerType: 'touch' },
+                actions: [
+                    { type: 'pointerMove', duration: 0, x, y: Math.round(fromY) },
+                    { type: 'pointerDown', button: 0 },
+                    { type: 'pointerMove', duration: 400, x, y: Math.round(toY) },
+                    { type: 'pointerUp', button: 0 },
+                ],
+            }]);
+            await driver.releaseActions();
+            await driver.pause(1_000);
+        };
+        const before = await control.getScreenshot(session.device.udid);
+        await swipe(height * 0.75, height * 0.35);
+        const scrolled = await control.getScreenshot(session.device.udid);
+        await swipe(height * 0.35, height * 0.75);
+        if (scrolled.equals(before)) throw new Error('Scrolling Settings produced no visible screen change; WDA touch input is not working');
+    }
+
     private async finalize(session: RegistrationSession): Promise<RegistrationSnapshot> {
         this.recalculate(session);
-        if (!session.canFinalize) throw new Error('Every live readiness check must pass before registration can finish');
+        if (!session.canFinalize) throw new Error('Every live readiness check must pass (TikTok and Instagram may be skipped) before registration can finish');
         const added = await mutateRegisteredDevices((devices) => {
             if (devices.some(({ udid }) => udid === session.device.udid)) return false;
             devices.push({
@@ -576,9 +636,7 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
             try {
                 const bundleId = process.env.TIKTOK_BUNDLE_ID ?? 'com.zhiliaoapp.musically';
                 const apps = await client.lookupApplications({ bundleIds: [bundleId] });
-                session.checks.tiktok = apps[bundleId]
-                    ? check('passed', `TikTok (${bundleId}) is installed`)
-                    : check('blocked', 'Install TikTok from the App Store, sign in, then recheck');
+                session.checks.tiktok = appInstallCheck('TikTok', Boolean(apps[bundleId]), bundleId, session.tiktokAccounts);
             } finally {
                 client.close();
             }
@@ -601,9 +659,7 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
             try {
                 const bundleId = process.env.INSTAGRAM_BUNDLE_ID ?? 'com.burbn.instagram';
                 const apps = await client.lookupApplications({ bundleIds: [bundleId] });
-                session.checks.instagram = apps[bundleId]
-                    ? check('passed', `Instagram (${bundleId}) is installed`)
-                    : check('blocked', 'Install Instagram from the App Store, sign in, then recheck');
+                session.checks.instagram = appInstallCheck('Instagram', Boolean(apps[bundleId]), bundleId, session.instagramAccounts);
             } finally {
                 client.close();
             }
@@ -683,7 +739,7 @@ export class DeviceRegistrationService implements DeviceRegistrationManager {
     }
 
     private recalculate(session: RegistrationSession): void {
-        session.canFinalize = checkNames.every((name) => session.checks[name].state === 'passed')
+        session.canFinalize = checksAllowFinalize(session.checks)
             && Boolean(session.name && session.coordinateProfile);
     }
 

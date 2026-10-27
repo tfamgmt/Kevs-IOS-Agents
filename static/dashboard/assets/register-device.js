@@ -97,7 +97,7 @@ function render(snapshot) {
         row.className = `registration-check ${value.state}`;
         const state = document.createElement('span');
         state.className = `check-mark ${value.state}`;
-        state.textContent = value.state === 'passed' ? '✓' : value.state === 'checking' ? '…' : '!';
+        state.textContent = value.state === 'passed' ? '✓' : value.state === 'skipped' ? '–' : value.state === 'checking' ? '…' : '!';
         const copy = document.createElement('div');
         const heading = document.createElement('h3');
         heading.textContent = key.replace(/^./, (letter) => letter.toUpperCase());
